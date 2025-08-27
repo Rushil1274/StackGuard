@@ -1,4 +1,4 @@
-# AWS S3 Provisioning and Go Fetcher
+# AWS S3 Provisioning and Go Fetcher.
 
 This project contains two main parts:
 1.  **Terraform & GitHub Actions**: Automatically provisions an AWS S3 bucket and an IAM user with read-only access.
