@@ -5,7 +5,7 @@ provider "aws" {
 
 # Create a random string to ensure the S3 bucket name is unique
 resource "random_pet" "bucket_name" {
-  prefix = "my-unique-bucket"
+  prefix = "my-unique-bucket-stackguard"
   length = 2
 }
 
