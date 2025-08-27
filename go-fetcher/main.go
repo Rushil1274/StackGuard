@@ -12,9 +12,19 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/joho/godotenv"
 )
 
 func main() {
+	// Load environment variables from .env file
+	err := godotenv.Load()
+	if err != nil {
+		log.Printf("Warning: Error loading .env file: %v", err)
+		log.Println("Continuing with system environment variables...")
+	} else {
+		log.Println("Successfully loaded .env file")
+	}
+
 	// Load AWS configuration
 	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
@@ -31,6 +41,8 @@ func main() {
 	}
 
 	log.Println("Starting S3 fetcher...")
+	log.Printf("Using bucket: %s", bucketName)
+	log.Printf("Using region: %s", os.Getenv("AWS_REGION"))
 	
 	// Perform initial fetch
 	log.Println("Performing initial fetch...")
