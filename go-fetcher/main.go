@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -15,94 +15,121 @@ import (
 )
 
 func main() {
-	// Get config from environment variables
-	bucketName := os.Getenv("AWS_S3_BUCKET")
-	if bucketName == "" {
-		log.Fatal("AWS_S3_BUCKET environment variable must be set")
-	}
-
-	// Load AWS config from environment (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION)
+	// Load AWS configuration
 	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
-		log.Fatalf("Unable to load SDK config, %v", err)
+		log.Fatalf("Unable to load SDK config: %v", err)
 	}
 
+	// Create S3 client and downloader
 	s3Client := s3.NewFromConfig(cfg)
 	downloader := manager.NewDownloader(s3Client)
 
-	log.Printf("🚀 Starting S3 Fetcher for bucket: %s", bucketName)
-	log.Println("Will fetch files every 10 minutes.")
+	bucketName := os.Getenv("AWS_S3_BUCKET")
+	if bucketName == "" {
+		log.Fatal("AWS_S3_BUCKET environment variable is required")
+	}
 
-	// Run immediately on start, then every 10 minutes
+	log.Println("Starting S3 fetcher...")
+	
+	// Perform initial fetch
+	log.Println("Performing initial fetch...")
+	fetchFiles(s3Client, downloader, bucketName)
+	log.Println("Initial fetch complete")
+
+	// Set up ticker for 10-minute intervals
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 
-	for ; ; <-ticker.C {
-		log.Println("--- Starting fetch cycle ---")
-		fetchAndDownloadFiles(downloader, bucketName)
-		log.Println("--- Finished fetch cycle. Waiting for next run. ---")
-		// The first tick happens immediately, so we run the job right away.
-		// Subsequent ticks will wait for the 10-minute duration.
-		if ticker.C == nil { // This is to ensure we run it once at the start.
-			fetchAndDownloadFiles(downloader, bucketName)
+	log.Println("Waiting for next cycle (10 minutes)...")
+
+	for {
+		select {
+		case <-ticker.C:
+			log.Println("Performing scheduled fetch...")
+			fetchFiles(s3Client, downloader, bucketName)
+			log.Println("Fetch cycle complete")
+			log.Println("Waiting for next cycle (10 minutes)...")
 		}
 	}
 }
 
-// fetchAndDownloadFiles lists all objects and downloads them.
-func fetchAndDownloadFiles(downloader *manager.Downloader, bucketName string) {
-	// List objects in the bucket
-	paginator := s3.NewListObjectsV2Paginator(downloader.S3, &s3.ListObjectsV2Input{
+func fetchFiles(s3Client *s3.Client, downloader *manager.Downloader, bucketName string) {
+	// Create local directory
+	localDir := bucketName
+	if err := os.MkdirAll(localDir, 0755); err != nil {
+		log.Printf("Error creating directory: %v", err)
+		return
+	}
+
+	// List all objects in the bucket
+	paginator := s3.NewListObjectsV2Paginator(s3Client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(bucketName),
 	})
 
-	filesDownloaded := 0
+	objectCount := 0
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(context.TODO())
 		if err != nil {
-			log.Printf("❌ Could not list objects in bucket %s: %v", bucketName, err)
-			return // Exit this cycle on error
-		}
-
-		if len(page.Contents) == 0 {
-			log.Println(" bucket is empty. Nothing to download.")
+			log.Printf("Error listing objects: %v", err)
 			return
 		}
 
-		for _, item := range page.Contents {
-			// S3 objects ending with '/' are directories, skip them
-			if *item.Key == "" || (*item.Key)[len(*item.Key)-1] == '/' {
+		for _, obj := range page.Contents {
+			objectCount++
+			key := aws.ToString(obj.Key)
+			
+			// Skip if it's a folder (ends with /)
+			if strings.HasSuffix(key, "/") {
 				continue
 			}
 
-			// Create local file path
-			localPath := filepath.Join(bucketName, *item.Key)
-			if err := os.MkdirAll(filepath.Dir(localPath), os.ModePerm); err != nil {
-				log.Printf("❌ Could not create directory %s: %v", filepath.Dir(localPath), err)
+			localPath := filepath.Join(localDir, key)
+			
+			// Create directory structure
+			dir := filepath.Dir(localPath)
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				log.Printf("Error creating directory %s: %v", dir, err)
 				continue
 			}
 
-			// Create the file
+			// Check if file already exists and has same size
+			if fileInfo, err := os.Stat(localPath); err == nil {
+				if fileInfo.Size() == aws.ToInt64(obj.Size) {
+					log.Printf("File already exists with same size, skipping: %s", key)
+					continue
+				}
+			}
+
+			log.Printf("Downloading: %s", key)
+			
+			// Download the file
 			file, err := os.Create(localPath)
 			if err != nil {
-				log.Printf("❌ Could not create local file %s: %v", localPath, err)
+				log.Printf("Error creating file %s: %v", localPath, err)
 				continue
 			}
-			defer file.Close()
 
-			// Download the object from S3
 			_, err = downloader.Download(context.TODO(), file, &s3.GetObjectInput{
 				Bucket: aws.String(bucketName),
-				Key:    item.Key,
+				Key:    aws.String(key),
 			})
+			
+			file.Close()
 
 			if err != nil {
-				log.Printf("❌ Failed to download %s: %v", *item.Key, err)
-			} else {
-				log.Printf("✅ Downloaded s3://%s/%s to %s", bucketName, *item.Key, localPath)
-				filesDownloaded++
+				log.Printf("Error downloading %s: %v", key, err)
+				os.Remove(localPath) // Clean up partial download
+				continue
 			}
+
+			log.Printf("Downloaded: %s", key)
 		}
 	}
-	log.Printf("Downloaded %d files in this cycle.", filesDownloaded)
+
+	if objectCount == 0 {
+		log.Printf("Bucket is empty, no files to download")
+	} else {
+		log.Printf("Listed objects in bucket: %s", bucketName)
+	}
 }
